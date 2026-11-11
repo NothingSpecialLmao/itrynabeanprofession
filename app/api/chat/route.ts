@@ -57,60 +57,69 @@ function extractJsonFromString(raw: string) {
 
 async function callGemini(messages: any[]) {
   const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) throw new Error('Thiếu GEMINI_API_KEY trong .env.local');
+  if (!apiKey) throw new Error('GEMINI_API_KEY_MISSING');
 
   const validMessages = messages
     .filter((m: any) => m && typeof m.content === 'string' && m.content.trim())
     .filter((m: any, idx: number) => !(idx === 0 && m.role === 'assistant'))
-    .slice(-6);
+    .slice(-4);
 
   const contents = validMessages.map((m: any) => ({
     role: m.role === 'assistant' ? 'model' : 'user',
     parts: [{ text: m.content }]
   }));
 
+  // Phiên bản model chỉ định
   const models = ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-pro'];
+
   let lastErr = '';
 
   for (const model of models) {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
 
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        contents,
-        generationConfig: {
-          responseMimeType: 'application/json',
-          temperature: 0.75,
-          maxOutputTokens: 1400
-        },
-        safetySettings: [
-          { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-          { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
-        ]
-      }),
-      signal: AbortSignal.timeout(45000)
-    });
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+          contents,
+          generationConfig: {
+            responseMimeType: 'application/json',
+            temperature: 0.75,
+            maxOutputTokens: 800
+          },
+          safetySettings: [
+            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+          ]
+        }),
+        signal: controller.signal
+      });
 
-    if (res.ok) {
-      const data = await res.json();
-      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (text) {
-        console.log(`[Gemini ${model} raw]`, text);
-        return text as string;
+      clearTimeout(timeoutId);
+
+      if (res.ok) {
+        const data = await res.json();
+        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (text) return text;
+      } else {
+        const errText = await res.text();
+        lastErr = `${model} -> HTTP ${res.status}: ${errText}`;
+        continue;
       }
-    } else {
-      lastErr = `Gemini (${model}) HTTP ${res.status}: ${await res.text()}`;
-      if (res.status === 404 || res.status === 429 || res.status === 503) continue;
-      break;
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      lastErr = `${model} -> ${err?.message || 'Lỗi mạng/Timeout'}`;
+      continue;
     }
   }
 
-  throw new Error(lastErr || 'Tất cả model Gemini đều không phản hồi');
+  throw new Error(lastErr || 'Không kết nối được model nào trong danh sách');
 }
 
 async function callOllama(messages: any[]) {
